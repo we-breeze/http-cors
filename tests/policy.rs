@@ -1,0 +1,251 @@
+use brz_http_cors::{Cors, PreflightRequest};
+use http::StatusCode;
+use http::header::{HeaderMap, HeaderValue, VARY};
+
+const ORIGIN: &[u8] = b"https://app.example";
+
+fn request() -> PreflightRequest<'static> {
+    PreflightRequest {
+        method: "OPTIONS",
+        origin: Some(ORIGIN),
+        request_method: Some(b"GET"),
+        request_headers: Some(b"authorization,content-type,x-request-id"),
+    }
+}
+
+#[test]
+fn credentialed_preflight_reflects_origin_and_requested_headers() {
+    let cors = Cors {
+        allow_credentials: true,
+        ..Cors::permissive()
+    };
+    let response = cors.preflight(request()).unwrap();
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, b"OK");
+    assert_eq!(
+        response.headers["access-control-allow-origin"],
+        "https://app.example"
+    );
+    assert_eq!(response.headers["access-control-allow-credentials"], "true");
+    assert_eq!(
+        response.headers["access-control-allow-headers"],
+        "authorization,content-type,x-request-id"
+    );
+    assert_eq!(response.headers["access-control-max-age"], "600");
+    assert_eq!(
+        response.headers["content-type"],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(response.headers[VARY], "Origin");
+}
+
+#[test]
+fn ordinary_options_and_other_methods_are_not_preflights() {
+    let cors = Cors::permissive();
+    for ordinary in [
+        PreflightRequest {
+            origin: None,
+            ..request()
+        },
+        PreflightRequest {
+            request_method: None,
+            ..request()
+        },
+        PreflightRequest {
+            method: "GET",
+            ..request()
+        },
+    ] {
+        assert!(cors.preflight(ordinary).is_none());
+    }
+}
+
+#[test]
+fn rejects_disallowed_origin_method_and_headers() {
+    let cors = Cors {
+        allow_origins: vec!["https://app.example".into()],
+        allow_methods: vec!["GET".into()],
+        allow_headers: vec!["authorization".into(), "x-request-id".into()],
+        ..Cors::default()
+    };
+    assert_eq!(cors.preflight(request()).unwrap().status, StatusCode::OK);
+    for denied in [
+        PreflightRequest {
+            origin: Some(b"https://other.example"),
+            ..request()
+        },
+        PreflightRequest {
+            request_method: Some(b"POST"),
+            ..request()
+        },
+        PreflightRequest {
+            request_headers: Some(b"x-disallowed"),
+            ..request()
+        },
+        PreflightRequest {
+            request_headers: Some(b"invalid header name"),
+            ..request()
+        },
+        PreflightRequest {
+            request_headers: Some(b"\xff"),
+            ..request()
+        },
+        PreflightRequest {
+            request_method: Some(b"\xff"),
+            ..request()
+        },
+        PreflightRequest {
+            origin: Some(b"\xff"),
+            ..request()
+        },
+    ] {
+        let response = cors.preflight(denied).unwrap();
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.body, b"Disallowed CORS request");
+    }
+}
+
+#[test]
+fn custom_method_and_method_order_are_configurable() {
+    let cors = Cors {
+        allow_methods: [
+            "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "QUERY",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        ..Cors::permissive()
+    };
+    assert!(cors.validate());
+    let response = cors
+        .preflight(PreflightRequest {
+            request_method: Some(b"QUERY"),
+            ..request()
+        })
+        .unwrap();
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.headers["access-control-allow-methods"],
+        "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT, QUERY"
+    );
+}
+
+#[test]
+fn header_names_are_case_insensitive_and_safelisted_headers_are_allowed() {
+    let cors = Cors {
+        allow_headers: vec!["AUTHORIZATION".into()],
+        ..Cors::permissive()
+    };
+    let response = cors
+        .preflight(PreflightRequest {
+            request_headers: Some(
+                b"authorization, Content-Type, ACCEPT, accept-language, content-language",
+            ),
+            ..request()
+        })
+        .unwrap();
+    assert_eq!(response.status, StatusCode::OK);
+}
+
+#[test]
+fn outer_policy_replaces_upstream_cors_and_preserves_repeated_headers() {
+    let cors = Cors {
+        allow_credentials: true,
+        expose_headers: vec!["X-Request-ID".into()],
+        ..Cors::permissive()
+    };
+    let mut headers = HeaderMap::new();
+    headers.append("set-cookie", HeaderValue::from_static("a=1"));
+    headers.append("set-cookie", HeaderValue::from_static("b=2"));
+    headers.append(VARY, HeaderValue::from_static("Accept-Encoding"));
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("DELETE"),
+    );
+    cors.apply(Some(ORIGIN), &mut headers);
+    cors.apply(Some(ORIGIN), &mut headers);
+    assert_eq!(headers.get_all("set-cookie").iter().count(), 2);
+    assert_eq!(
+        headers
+            .get_all("access-control-allow-origin")
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(
+        headers["access-control-allow-origin"],
+        "https://app.example"
+    );
+    assert_eq!(headers["access-control-expose-headers"], "X-Request-ID");
+    assert!(!headers.contains_key("access-control-allow-methods"));
+    assert_eq!(
+        headers
+            .get_all(VARY)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["Accept-Encoding", "Origin"]
+    );
+}
+
+#[test]
+fn denied_origins_remove_upstream_permissions_and_still_vary() {
+    let cors = Cors {
+        allow_origins: vec!["https://app.example".into()],
+        ..Cors::default()
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-credentials",
+        HeaderValue::from_static("true"),
+    );
+    cors.apply(Some(b"https://other.example"), &mut headers);
+    assert!(!headers.contains_key("access-control-allow-origin"));
+    assert!(!headers.contains_key("access-control-allow-credentials"));
+    assert_eq!(headers[VARY], "Origin");
+}
+
+#[test]
+fn absent_origin_preserves_headers_and_vary_wildcard_is_not_extended() {
+    let cors = Cors {
+        allow_credentials: true,
+        ..Cors::permissive()
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(VARY, HeaderValue::from_static("*"));
+    cors.apply(None, &mut headers);
+    assert_eq!(headers.len(), 1);
+    cors.apply(Some(ORIGIN), &mut headers);
+    assert_eq!(headers.get_all(VARY).iter().count(), 1);
+    assert_eq!(headers[VARY], "*");
+}
+
+#[test]
+fn invalid_configuration_is_rejected() {
+    assert!(Cors::default().validate());
+    for cors in [
+        Cors {
+            allow_origins: vec!["bad\r\norigin".into()],
+            ..Cors::default()
+        },
+        Cors {
+            allow_methods: vec!["bad method".into()],
+            ..Cors::default()
+        },
+        Cors {
+            allow_methods: vec!["*".into()],
+            ..Cors::default()
+        },
+        Cors {
+            allow_headers: vec!["bad header".into()],
+            ..Cors::default()
+        },
+        Cors {
+            expose_headers: vec!["bad header".into()],
+            ..Cors::default()
+        },
+    ] {
+        assert!(!cors.validate());
+    }
+}
