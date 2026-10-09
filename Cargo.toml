@@ -1,0 +1,17 @@
+[package]
+name = "brz-http-cors"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Shared CORS policy for Breeze HTTP servers and gateways"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/we-breeze/http-cors"
+
+[dependencies]
+http = "1"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
