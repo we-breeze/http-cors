@@ -235,8 +235,20 @@ impl Cors {
 
     /// Apply the outer policy to response headers without touching the body.
     /// Replaces upstream CORS fields and preserves all unrelated header values,
-    /// including repeated Set-Cookie and Vary fields.
+    /// including repeated Set-Cookie and Vary fields. Always varies by Origin:
+    /// CORS headers depend on its presence as well as its value.
     pub fn apply(&self, origin: Option<&[u8]>, headers: &mut HeaderMap) {
+        let varies_by_origin = headers.get_all(VARY).iter().any(|existing| {
+            existing.to_str().is_ok_and(|existing| {
+                existing
+                    .split(',')
+                    .map(str::trim)
+                    .any(|token| token == "*" || token.eq_ignore_ascii_case("origin"))
+            })
+        });
+        if !varies_by_origin {
+            headers.append(VARY, HeaderValue::from_static("Origin"));
+        }
         let Some(origin) = origin else {
             return;
         };
@@ -247,19 +259,7 @@ impl Cors {
             return;
         };
         for (name, value) in &self.origin_headers(origin) {
-            if name == VARY {
-                let present = headers.get_all(VARY).iter().any(|existing| {
-                    existing.to_str().is_ok_and(|existing| {
-                        existing
-                            .split(',')
-                            .map(str::trim)
-                            .any(|token| token == "*" || token.eq_ignore_ascii_case("origin"))
-                    })
-                });
-                if !present {
-                    headers.append(VARY, value.clone());
-                }
-            } else {
+            if name != VARY {
                 headers.insert(name.clone(), value.clone());
             }
         }
