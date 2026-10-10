@@ -30,7 +30,11 @@ this setting affects only preflight responses and does not enable extension
 permissions such as Private Network Access.
 It replaces upstream CORS fields, preserves repeated unrelated fields such as
 Set-Cookie, and adds Vary: Origin without duplicating or replacing existing
-Vary tokens. Requests with no Origin keep their response headers unchanged.
+Vary tokens. Ordinary responses always vary by Origin because CORS headers
+depend on its presence as well as its value, including with wildcard origins.
+Requests with no Origin receive only this cache declaration; the policy adds
+no access-control permissions or exposed headers to them. Other response
+fields remain unchanged. Existing Vary: * is preserved.
 
 ```rust
 use brz_http_cors::{Cors, PreflightRequest};

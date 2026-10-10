@@ -297,18 +297,80 @@ fn denied_origins_remove_upstream_permissions_and_still_vary() {
 }
 
 #[test]
-fn absent_origin_preserves_headers_and_vary_wildcard_is_not_extended() {
+fn ordinary_responses_vary_by_origin_including_absent_and_malformed_origins() {
+    for cors in [
+        Cors::permissive(),
+        Cors {
+            allow_credentials: true,
+            ..Cors::permissive()
+        },
+        Cors {
+            allow_origins: vec!["https://app.example".into()],
+            ..Cors::default()
+        },
+    ] {
+        for origin in [
+            None,
+            Some(ORIGIN),
+            Some(b"https://other.example"),
+            Some(b"\xff"),
+        ] {
+            let mut headers = HeaderMap::new();
+            cors.apply(origin, &mut headers);
+            assert_eq!(headers[VARY], "Origin");
+            if origin.is_none() || origin == Some(b"\xff".as_slice()) {
+                assert_eq!(headers.len(), 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn absent_origin_preserves_response_fields_and_merges_vary_once() {
     let cors = Cors {
         allow_credentials: true,
+        expose_headers: vec!["X-Request-ID".into()],
         ..Cors::permissive()
     };
     let mut headers = HeaderMap::new();
-    headers.insert(VARY, HeaderValue::from_static("*"));
+    headers.append(VARY, HeaderValue::from_static("Accept-Encoding"));
+    headers.append(VARY, HeaderValue::from_static("Accept-Language"));
+    headers.append("set-cookie", HeaderValue::from_static("a=1"));
+    headers.append("set-cookie", HeaderValue::from_static("b=2"));
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert(
+        "cache-control",
+        HeaderValue::from_static("private, no-store"),
+    );
     cors.apply(None, &mut headers);
-    assert_eq!(headers.len(), 1);
-    cors.apply(Some(ORIGIN), &mut headers);
-    assert_eq!(headers.get_all(VARY).iter().count(), 1);
-    assert_eq!(headers[VARY], "*");
+    cors.apply(None, &mut headers);
+    assert_eq!(
+        headers
+            .get_all(VARY)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["Accept-Encoding", "Accept-Language", "Origin"]
+    );
+    assert_eq!(headers.get_all("set-cookie").iter().count(), 2);
+    assert_eq!(headers["content-type"], "application/json");
+    assert_eq!(headers["cache-control"], "private, no-store");
+    assert!(!headers.contains_key("access-control-allow-origin"));
+    assert!(!headers.contains_key("access-control-allow-credentials"));
+    assert!(!headers.contains_key("access-control-expose-headers"));
+}
+
+#[test]
+fn existing_origin_and_vary_wildcard_are_not_extended() {
+    let cors = Cors::permissive();
+    for vary in ["Accept-Encoding, oRiGiN", "*"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(VARY, HeaderValue::from_static(vary));
+        cors.apply(None, &mut headers);
+        cors.apply(Some(ORIGIN), &mut headers);
+        assert_eq!(headers.get_all(VARY).iter().count(), 1);
+        assert_eq!(headers[VARY], vary);
+    }
 }
 
 #[test]
