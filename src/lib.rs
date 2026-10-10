@@ -23,6 +23,12 @@ pub struct Cors {
     pub allow_methods: Vec<String>,
     pub allow_headers: Vec<String>,
     pub expose_headers: Vec<String>,
+    /// Additional request header names to include in preflight Vary responses.
+    /// Origin (when reflected), Access-Control-Request-Method and
+    /// Access-Control-Request-Headers are managed by the policy automatically.
+    /// Names retain their configured spelling and order and are deduplicated
+    /// case-insensitively. This does not grant permissions for any extension.
+    pub extra_preflight_vary: Vec<String>,
     pub allow_credentials: bool,
     pub max_age: u64,
 }
@@ -36,6 +42,7 @@ impl Default for Cors {
                 .to_vec(),
             allow_headers: Vec::new(),
             expose_headers: Vec::new(),
+            extra_preflight_vary: Vec::new(),
             allow_credentials: false,
             max_age: 600,
         }
@@ -84,6 +91,10 @@ impl Cors {
                 .iter()
                 .chain(&self.expose_headers)
                 .all(|value| value == "*" || HeaderName::from_bytes(value.as_bytes()).is_ok())
+            && self
+                .extra_preflight_vary
+                .iter()
+                .all(|value| value != "*" && HeaderName::from_bytes(value.as_bytes()).is_ok())
     }
 
     fn permits_origin(&self, origin: &str) -> bool {
@@ -92,10 +103,13 @@ impl Cors {
             .any(|allowed| allowed == "*" || allowed == origin)
     }
 
-    fn response_headers(&self, origin: &str) -> HeaderMap {
+    fn varies_by_origin(&self) -> bool {
+        self.allow_credentials || !self.allow_origins.iter().any(|allowed| allowed == "*")
+    }
+
+    fn origin_headers(&self, origin: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        let reflected =
-            self.allow_credentials || !self.allow_origins.iter().any(|allowed| allowed == "*");
+        let reflected = self.varies_by_origin();
         // Denied origins must vary too: a cache must not reuse a denial for
         // an allowed origin, or an allowed response for a denied origin.
         if reflected {
@@ -115,13 +129,30 @@ impl Cors {
                 HeaderValue::from_static("true"),
             );
         }
-        if !self.expose_headers.is_empty() {
-            insert(
-                &mut headers,
-                "access-control-expose-headers",
-                &self.expose_headers.join(", "),
-            );
+        headers
+    }
+
+    fn preflight_headers(&self, origin: Option<&str>) -> HeaderMap {
+        let mut headers = origin.map_or_else(HeaderMap::new, |origin| self.origin_headers(origin));
+        let mut vary = Vec::new();
+        if self.varies_by_origin() {
+            vary.push("Origin");
         }
+        for name in [
+            "Access-Control-Request-Method",
+            "Access-Control-Request-Headers",
+        ]
+        .into_iter()
+        .chain(self.extra_preflight_vary.iter().map(String::as_str))
+        {
+            if !vary
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(name))
+            {
+                vary.push(name);
+            }
+        }
+        insert(&mut headers, "vary", &vary.join(", "));
         headers
     }
 
@@ -163,8 +194,7 @@ impl Cors {
             && method
                 .is_some_and(|method| self.allow_methods.iter().any(|allowed| allowed == method))
             && headers_allowed;
-        let mut headers =
-            origin.map_or_else(HeaderMap::new, |origin| self.response_headers(origin));
+        let mut headers = self.preflight_headers(origin);
         insert(
             &mut headers,
             "access-control-allow-methods",
@@ -216,7 +246,7 @@ impl Cors {
         let Ok(origin) = std::str::from_utf8(origin) else {
             return;
         };
-        for (name, value) in &self.response_headers(origin) {
+        for (name, value) in &self.origin_headers(origin) {
             if name == VARY {
                 let present = headers.get_all(VARY).iter().any(|existing| {
                     existing.to_str().is_ok_and(|existing| {
@@ -232,6 +262,13 @@ impl Cors {
             } else {
                 headers.insert(name.clone(), value.clone());
             }
+        }
+        if self.permits_origin(origin) && !self.expose_headers.is_empty() {
+            insert(
+                headers,
+                "access-control-expose-headers",
+                &self.expose_headers.join(", "),
+            );
         }
     }
 }

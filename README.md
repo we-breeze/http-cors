@@ -20,6 +20,14 @@ Call `Cors::validate()` at startup. Pass borrowed request metadata to
 `Cors::preflight()`, and render the returned status, headers and static body.
 Malformed and disallowed preflights return 400; permitted preflights return
 200 with `OK`. For ordinary responses, `Cors::apply()` updates only headers.
+`expose_headers` applies only to ordinary responses, not to preflight responses.
+Preflight Vary includes Access-Control-Request-Method and
+Access-Control-Request-Headers, plus Origin when the policy reflects origins.
+Configure `extra_preflight_vary` with additional request header names required
+by an application's cache policy or source compatibility contract. Names retain
+their configured spelling and order and are deduplicated case-insensitively;
+this setting affects only preflight responses and does not enable extension
+permissions such as Private Network Access.
 It replaces upstream CORS fields, preserves repeated unrelated fields such as
 Set-Cookie, and adds Vary: Origin without duplicating or replacing existing
 Vary tokens. Requests with no Origin keep their response headers unchanged.
@@ -27,7 +35,12 @@ Vary tokens. Requests with no Origin keep their response headers unchanged.
 ```rust
 use brz_http_cors::{Cors, PreflightRequest};
 
-let cors = Cors { allow_credentials: true, ..Cors::permissive() };
+let cors = Cors {
+    allow_credentials: true,
+    expose_headers: vec!["X-Request-ID".into()],
+    extra_preflight_vary: vec!["X-Preflight-Variant".into()],
+    ..Cors::permissive()
+};
 assert!(cors.validate());
 let response = cors.preflight(PreflightRequest {
     method: "OPTIONS",
@@ -37,17 +50,19 @@ let response = cors.preflight(PreflightRequest {
 }).unwrap();
 assert_eq!(response.status, http::StatusCode::OK);
 assert_eq!(response.body, b"OK");
+assert!(!response.headers.contains_key("access-control-expose-headers"));
+assert_eq!(response.headers["vary"],
+    "Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-Preflight-Variant");
 ```
 
 ## Development and release order
 
 Keep the three repositories as sibling directories named `http-cors`,
 `http-server`, and `http-gateway` while developing the shared policy. The two
-consumers currently use versioned sibling path dependencies. Publish
-`brz-http-cors` 0.0.1 first, then replace the consumers' development path
-dependencies with registry dependencies and regenerate their lockfiles before
-releasing those packages. The application must upgrade and explicitly enable
-gateway CORS to use the new behavior.
+consumers pin published registry versions. Publish a new `brz-http-cors` version
+first, then update the consumers' dependency pins and lockfiles before releasing
+them. The application must upgrade and explicitly enable gateway CORS to use
+the shared behavior.
 
 ```sh
 cargo fmt --all -- --check

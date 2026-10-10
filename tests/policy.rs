@@ -36,7 +36,97 @@ fn credentialed_preflight_reflects_origin_and_requested_headers() {
         response.headers["content-type"],
         "text/plain; charset=utf-8"
     );
-    assert_eq!(response.headers[VARY], "Origin");
+    assert_eq!(
+        response.headers[VARY],
+        "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+    );
+}
+
+#[test]
+fn exposed_headers_are_only_added_to_actual_responses() {
+    let cors = Cors {
+        expose_headers: vec!["X-Request-ID".into()],
+        ..Cors::permissive()
+    };
+    for method in [b"GET".as_slice(), b"DISALLOWED", b"\xff"] {
+        let response = cors
+            .preflight(PreflightRequest {
+                request_method: Some(method),
+                ..request()
+            })
+            .unwrap();
+        assert!(
+            !response
+                .headers
+                .contains_key("access-control-expose-headers")
+        );
+    }
+    let mut headers = HeaderMap::new();
+    cors.apply(Some(ORIGIN), &mut headers);
+    assert_eq!(headers["access-control-expose-headers"], "X-Request-ID");
+}
+
+#[test]
+fn extra_preflight_vary_is_ordered_deduplicated_and_does_not_grant_permissions() {
+    let cors = Cors {
+        allow_credentials: true,
+        extra_preflight_vary: [
+            "origin",
+            "ACCESS-CONTROL-REQUEST-METHOD",
+            "X-Preflight-Variant",
+            "x-preflight-variant",
+            "Access-Control-Request-Private-Network",
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        ..Cors::permissive()
+    };
+    assert!(cors.validate());
+    let response = cors.preflight(request()).unwrap();
+    assert_eq!(
+        response.headers[VARY],
+        "Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-Preflight-Variant, Access-Control-Request-Private-Network"
+    );
+    assert!(
+        !response
+            .headers
+            .contains_key("access-control-allow-private-network")
+    );
+    let mut headers = HeaderMap::new();
+    cors.apply(Some(ORIGIN), &mut headers);
+    assert_eq!(headers[VARY], "Origin");
+}
+
+#[test]
+fn wildcard_origin_preflights_vary_by_method_and_headers() {
+    let response = Cors::permissive().preflight(request()).unwrap();
+    assert_eq!(response.headers["access-control-allow-origin"], "*");
+    assert_eq!(
+        response.headers[VARY],
+        "Access-Control-Request-Method, Access-Control-Request-Headers"
+    );
+}
+
+#[test]
+fn denied_and_malformed_preflights_keep_the_full_vary_policy() {
+    let cors = Cors {
+        allow_origins: vec!["https://app.example".into()],
+        extra_preflight_vary: vec!["X-Preflight-Variant".into()],
+        ..Cors::default()
+    };
+    for origin in [b"https://other.example".as_slice(), b"\xff"] {
+        let response = cors
+            .preflight(PreflightRequest {
+                origin: Some(origin),
+                ..request()
+            })
+            .unwrap();
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers[VARY],
+            "Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-Preflight-Variant"
+        );
+    }
 }
 
 #[test]
@@ -243,6 +333,14 @@ fn invalid_configuration_is_rejected() {
         },
         Cors {
             expose_headers: vec!["bad header".into()],
+            ..Cors::default()
+        },
+        Cors {
+            extra_preflight_vary: vec!["bad\r\nheader".into()],
+            ..Cors::default()
+        },
+        Cors {
+            extra_preflight_vary: vec!["*".into()],
             ..Cors::default()
         },
     ] {
