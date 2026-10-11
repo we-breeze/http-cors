@@ -6,6 +6,9 @@
 use http::StatusCode;
 use http::header::{HeaderMap, HeaderName, HeaderValue, VARY};
 
+mod response;
+pub use response::{RESPONSE_CORS_HEADER, ResponseCors};
+
 const CORS_HEADERS: [&str; 6] = [
     "access-control-allow-origin",
     "access-control-allow-credentials",
@@ -237,6 +240,13 @@ impl Cors {
     /// Replaces upstream CORS fields and preserves all unrelated header values,
     /// including repeated Set-Cookie and Vary fields. Always varies by Origin:
     /// CORS headers depend on its presence as well as its value.
+    pub fn apply_response<B>(&self, origin: Option<&[u8]>, response: &mut http::Response<B>) {
+        if response.extensions().get::<ResponseCors>() != Some(&ResponseCors::Skip) {
+            self.apply(origin, response.headers_mut());
+        }
+    }
+
+    /// Apply CORS to ordinary response headers, including Origin cache variance.
     pub fn apply(&self, origin: Option<&[u8]>, headers: &mut HeaderMap) {
         let varies_by_origin = headers.get_all(VARY).iter().any(|existing| {
             existing.to_str().is_ok_and(|existing| {
