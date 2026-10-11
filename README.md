@@ -59,6 +59,24 @@ assert_eq!(response.headers["vary"],
     "Origin, Access-Control-Request-Method, Access-Control-Request-Headers, X-Preflight-Variant");
 ```
 
+## Response-local CORS
+
+`Cors::apply_response(origin, response)` honors a `ResponseCors::Skip` extension
+and otherwise applies the same policy as `apply`. Skip leaves every response
+header intact, including existing Vary and repeated Set-Cookie values. It adds
+neither access-control headers nor Vary: Origin. A 500 status alone never skips
+CORS: the application must explicitly identify responses rendered outside its
+normal CORS boundary, such as an outer unhandled-exception handler.
+
+For a separate internal HTTP server, the runtimes can explicitly opt into the
+reserved `x-breeze-response-cors: skip` response metadata. `ResponseCors` owns
+its encoding and consumption. Only one exact `skip` value is accepted; invalid
+or repeated values retain the normal policy. Gateways must consume the metadata
+before public delivery, even when they do not trust it. This is response
+metadata, never a client request control. Public servers do not export it by
+default. See the server's `ServerConfig::export_cors_policy` and the gateway's
+`OriginService::with_response_cors` for the complete internal-hop integration.
+
 ## Development and release order
 
 Keep the three repositories as sibling directories named `http-cors`,
